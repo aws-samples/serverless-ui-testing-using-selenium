@@ -1,0 +1,926 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: "AWS CloudFormation Template to deploy Serverless UI Testing (SUIT) pipeline"
+
+Parameters:
+  RepositoryName:
+    Description: Enter the name of the CodeCommit repository
+    Type: String
+    Default: serverless-ui-testing
+  ApprovalEmail:
+    Description: Enter the email address to which approval notification needs to be sent
+    Type: String
+    Default: ppalanis@amazon.com
+    AllowedPattern: ^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$
+    ConstraintDescription: Ecpects a valid email address
+
+Resources:
+  ApprovalTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub ${AWS::StackName}-approval-topic
+      DisplayName: SUIT-Approval-Notification
+      Subscription: 
+        - Endpoint: !Ref ApprovalEmail
+          Protocol: email
+      Tags: 
+        - Key: Application
+          Value: !Ref AWS::StackId
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-approval-topic
+
+  TestOutputBucket:
+    Type: "AWS::S3::Bucket"
+    UpdateReplacePolicy: Retain
+    DeletionPolicy: Retain
+    Properties:
+      AccessControl: Private
+      BucketName: !Sub ${AWS::StackName}-test-output-${AWS::AccountId}-${AWS::Region}
+      Tags:
+        - Key: Application
+          Value: !Ref AWS::StackId
+
+  CodePipelineArtifact:
+    Type: "AWS::S3::Bucket"
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      AccessControl: Private
+      BucketName: !Sub ${AWS::StackName}-codepipeline-artifact-${AWS::AccountId}-${AWS::Region}
+      Tags:
+        - Key: Application
+          Value: !Ref AWS::StackId
+
+  ECRRepository: 
+    Type: AWS::ECR::Repository
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties: 
+      RepositoryName: !Sub suit-${AWS::StackName}-repo
+      RepositoryPolicyText: |
+        {
+          "Version": "2008-10-17",
+          "Statement": [
+            {
+              "Sid": "LambdaECRImageRetrievalPolicy",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com"
+              },
+              "Action": [
+                "ecr:BatchGetImage",
+                "ecr:DeleteRepositoryPolicy",
+                "ecr:GetDownloadUrlForLayer",
+                "ecr:GetRepositoryPolicy",
+                "ecr:SetRepositoryPolicy"
+              ]
+            }
+          ]
+        }
+
+  ModulesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        -
+          AttributeName: ModId
+          AttributeType: S
+      KeySchema:
+        -
+          AttributeName: ModId
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+      TableName: !Sub ModulesTable-${AWS::StackName}
+      Tags:
+        - Key: Application
+          Value: !Ref AWS::StackId
+        - Key: Name
+          Value: !Sub ModulesTable-${AWS::StackName}
+
+  ModulesTableParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: ModulesTable
+      Type: String
+      Value: !Ref ModulesTable
+      Description: SSM Parameter for Modules Table.
+
+  TestOutputBucketParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: TestOutputBucket
+      Type: String
+      Value: !Ref TestOutputBucket
+      Description: SSM Parameter for Test Output Bucket
+
+  CodePipelineArtifactParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: CodePipelineArtifact
+      Type: String
+      Value: !Ref CodePipelineArtifact
+      Description: SSM Parameter for CodePipeline Artifact Bucket
+
+  SourceRepoParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: WebAppSourceRepo
+      Type: String
+      Value: !Ref RepositoryName
+      Description: SSM Parameter for Source Repository
+
+  StatusTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        -
+          AttributeName: testrunid
+          AttributeType: S
+        -
+          AttributeName: testcaseid
+          AttributeType: S
+      KeySchema:
+        -
+          AttributeName: testrunid
+          KeyType: HASH
+        -
+          AttributeName: testcaseid
+          KeyType: RANGE
+      BillingMode: PAY_PER_REQUEST
+      TableName: !Sub StatusTable-${AWS::StackName}
+      Tags:
+        - Key: Application
+          Value: !Ref AWS::StackId
+        - Key: Name
+          Value: !Sub StatusTable-${AWS::StackName}
+
+  StatusTableParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: StatusTable
+      Type: String
+      Value: !Ref StatusTable
+      Description: SSM Parameter for Status Table.
+
+  StatusPageCognitoIP:
+    Type: AWS::Cognito::IdentityPool
+    Properties:
+      IdentityPoolName: !Sub StatusPageCognitoIP_${AWS::StackName}
+      AllowUnauthenticatedIdentities: true
+
+  StatusPageUnAuthRole:
+    Type: AWS::IAM::Role
+    Properties:
+        RoleName:
+          Fn::Sub: StatusPageUnAuthRole-${AWS::StackName}
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            -
+              Effect: "Allow"
+              Principal:
+                Federated:
+                  - "cognito-identity.amazonaws.com"
+              Action:
+                - "sts:AssumeRoleWithWebIdentity"
+              Condition:
+                StringEquals:
+                  "cognito-identity.amazonaws.com:aud":
+                    Ref: StatusPageCognitoIP
+                ForAnyValue:StringLike:
+                  "cognito-identity.amazonaws.com:amr": unauthenticated
+        Path: /
+        Policies:
+            -
+              PolicyName:
+                Fn::Sub: StatusPageUnAuthRole-${AWS::StackName}-Policy
+              PolicyDocument:
+                Version: "2012-10-17"
+                Statement:
+                  -
+                    Effect: "Allow"
+                    Action:
+                      - "dynamodb:Query"
+                    Resource:
+                      - !GetAtt StatusTable.Arn
+
+  AttachCognitoUnAuthRole:
+    Type: "AWS::Cognito::IdentityPoolRoleAttachment"
+    Properties:
+      IdentityPoolId:
+        Ref: StatusPageCognitoIP
+      Roles:
+        unauthenticated: !GetAtt StatusPageUnAuthRole.Arn
+
+  AmplifyAccessRole:
+    Type: AWS::IAM::Role
+    Properties:
+        RoleName: !Sub SUIT-${AWS::StackName}-AmplifyRole
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            -
+              Effect: "Allow"
+              Principal:
+                Service:
+                  - amplify.amazonaws.com
+              Action:
+                - sts:AssumeRole
+        Path: /
+        Policies:
+          -
+            PolicyName: !Sub SUIT-${AWS::StackName}-AmplifyRole-Policy
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                -
+                  Effect: "Allow"
+                  Action:
+                    - "codecommit:GitPull"
+                  Resource:
+                    - !Sub arn:aws:codecommit:${AWS::Region}:${AWS::AccountId}:${RepositoryName}
+                -
+                  Effect: "Allow"
+                  Action:
+                    - "logs:CreateLogGroup"
+                    - "logs:CreateLogStream"
+                    - "logs:PutLogEvents"
+                  Resource:
+                    - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/amplify/*
+
+  TestApp:
+    Type: AWS::Amplify::App
+    Properties: 
+      Name: TestAppWebsite
+      Repository: !Sub https://git-codecommit.${AWS::Region}.amazonaws.com/v1/repos/${RepositoryName}
+      BuildSpec: |
+        version: 1
+        applications:
+          - frontend:
+              phases:
+                build:
+                  commands: []
+              artifacts:
+                baseDirectory: /
+                files:
+                  - '**/*'
+              cache:
+                paths: []
+            appRoot: website
+      IAMServiceRole: !GetAtt AmplifyAccessRole.Arn
+      CustomRules:
+        - Target: /index.html
+          Source: "/<*>"
+          Status: "404-200"
+      Tags: 
+        - Key: Application
+          Value: !Ref AWS::StackId
+        - Key: Name
+          Value: TestAppWebsite
+
+  TestAppBranch:
+    Type: AWS::Amplify::Branch
+    Properties: 
+      AppId: !GetAtt TestApp.AppId
+      BranchName: master
+      Description: Master branch for App
+      EnableAutoBuild: true
+      Stage: PRODUCTION
+      Tags: 
+        - Key: Application
+          Value: !Ref AWS::StackId
+        - Key: Name
+          Value: TestAppBranch
+
+  TestAppDomainParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: TestAppDomain
+      Type: String
+      Value: !GetAtt TestApp.DefaultDomain
+      Description: SSM Parameter for Test App Domain
+
+  StatusPage:
+    Type: AWS::Amplify::App
+    Properties: 
+      Name: StatusPage
+      Repository: !Sub https://git-codecommit.${AWS::Region}.amazonaws.com/v1/repos/${RepositoryName}
+      BuildSpec: |
+        version: 1
+        applications:
+          - frontend:
+              phases:
+                build:
+                  commands: []
+              artifacts:
+                baseDirectory: /
+                files:
+                  - '**/*'
+              cache:
+                paths: []
+            appRoot: status
+      IAMServiceRole: !GetAtt AmplifyAccessRole.Arn
+      CustomRules:
+        - Target: /index.html
+          Source: "/<*>"
+          Status: "404-200"
+      Tags: 
+        - Key: Application
+          Value: !Ref AWS::StackId
+        - Key: Name
+          Value: StatusPage
+
+  StatusPageBranch:
+    Type: AWS::Amplify::Branch
+    Properties: 
+      AppId: !GetAtt StatusPage.AppId
+      BranchName: master
+      Description: Master branch for Status
+      EnableAutoBuild: true
+      Stage: PRODUCTION
+      Tags: 
+        - Key: Application
+          Value: !Ref AWS::StackId
+        - Key: Name
+          Value: StatusPageBranch
+  
+  StatusPageDomainParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: StatusPageDomain
+      Type: String
+      Value: !GetAtt StatusPage.DefaultDomain
+      Description: SSM Parameter for Status Page Domain
+
+  CFNDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub CFNDeployRole-${AWS::StackName}
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "cloudformation.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: /
+      Policies:
+          -
+            PolicyName:
+              Fn::Sub: CFNDeployRole-${AWS::StackName}-Policy
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                -
+                  Effect: "Allow"
+                  Action:
+                    - "ec2:AuthorizeSecurityGroupEgress"
+                    - "ec2:AuthorizeSecurityGroupIngress"
+                    - "ec2:DeleteSubnet"
+                    - "ec2:ReplaceRouteTableAssociation"
+                    - "ec2:DeleteRoute"
+                    - "ec2:CreateVpc"
+                    - "ec2:DeleteVpc"
+                    - "ec2:CreateSecurityGroup"
+                    - "ec2:DeleteSecurityGroup"
+                    - "ec2:CreateRouteTable"
+                    - "ec2:DeleteRouteTable"
+                    - "ec2:AttachInternetGateway"
+                    - "ec2:DetachInternetGateway"
+                    - "ec2:DisassociateRouteTable"
+                    - "ec2:AssociateRouteTable"
+                    - "ec2:RevokeSecurityGroupIngress"
+                    - "ec2:CreateRoute"
+                    - "ec2:CreateInternetGateway"
+                    - "ec2:RevokeSecurityGroupEgress"
+                    - "ec2:CreateSubnet"
+                    - "ec2:CreateTags"
+                    - "ec2:DeleteTags"
+                    - "ec2:ModifyVpcAttribute"
+                    - "ec2:ModifySubnetAttribute"
+                    - "ec2:UpdateSecurityGroupRuleDescriptionsEgress"
+                    - "ec2:UpdateSecurityGroupRuleDescriptionsIngress"
+                  Resource:
+                    - !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:*
+                -
+                  Effect: "Allow"
+                  Action:
+                    - "iam:CreateInstanceProfile"
+                    - "iam:DeleteInstanceProfile"
+                    - "iam:GetRole"
+                    - "iam:GetPolicy"
+                    - "iam:RemoveRoleFromInstanceProfile"
+                    - "iam:UpdateRoleDescription"
+                    - "iam:CreateRole"
+                    - "iam:DeleteRole"
+                    - "iam:AddRoleToInstanceProfile"
+                    - "iam:PassRole"
+                    - "iam:CreateServiceLinkedRole"
+                    - "iam:UpdateRole"
+                    - "iam:DeleteServiceLinkedRole"
+                    - "iam:GetRolePolicy"
+                    - "iam:CreatePolicy"
+                    - "iam:UpdateAssumeRolePolicy"
+                    - "iam:DetachRolePolicy"
+                    - "iam:DeleteRolePolicy"
+                    - "iam:DeletePolicy"
+                    - "iam:AttachRolePolicy"
+                    - "iam:PutRolePolicy"
+                    - "iam:CreatePolicyVersion"
+                    - "iam:DeletePolicyVersion"
+                    - "iam:TagRole"
+                    - "iam:UntagRole"
+                    - "iam:TagPolicy"
+                    - "iam:UntagPolicy"
+                    - "iam:TagInstanceProfile"
+                    - "iam:UntagInstanceProfile"
+                  Resource:
+                    - Fn::Sub: arn:aws:iam::${AWS::AccountId}:*
+                -
+                  Effect: "Allow"
+                  Action:
+                    - "lambda:CreateFunction"
+                    - "lambda:UpdateFunctionEventInvokeConfig"
+                    - "lambda:TagResource"
+                    - "lambda:InvokeFunction"
+                    - "lambda:GetFunction"
+                    - "lambda:UpdateFunctionConfiguration"
+                    - "lambda:UntagResource"
+                    - "lambda:UpdateFunctionCode"
+                    - "lambda:AddPermission"
+                    - "lambda:PutFunctionEventInvokeConfig"
+                    - "lambda:DeleteFunctionEventInvokeConfig"
+                    - "lambda:DeleteFunction"
+                    - "lambda:DeleteEventSourceMapping"
+                    - "lambda:RemovePermission"
+                    - "lambda:GetFunctionConfiguration"
+                    - "lambda:ListTags"
+                  Resource:
+                    - !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:*
+                -
+                  Effect: "Allow"
+                  Action:
+                    - "ecs:DescribeTaskDefinition"
+                    - "ecs:DeleteCluster"
+                    - "ecs:TagResource"
+                    - "ecs:UntagResource"
+                  Resource:
+                    - !Sub arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:*
+                -
+                  Effect: "Allow"
+                  Action:
+                    - "codecommit:GetRepository"
+                    - "codecommit:GetBranch"
+                    - "codecommit:GetRepositoryTriggers"
+                    - "codecommit:PutRepositoryTriggers"
+                    - "codecommit:TestRepositoryTriggers"
+                    - "codecommit:TagResource"
+                    - "codecommit:UntagResource"
+                  Resource:
+                    - !Sub arn:aws:codecommit:${AWS::Region}:${AWS::AccountId}:*
+                -
+                  Effect: "Allow"
+                  Action:
+                    - "logs:TagLogGroup"
+                    - "logs:UntagLogGroup"
+                    - "logs:DeleteLogGroup"
+                    - "logs:DeleteRetentionPolicy"
+                    - "logs:PutRetentionPolicy"
+                    - "logs:CreateLogGroup"
+                  Resource:
+                    - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:*
+                -
+                  Effect: "Allow"
+                  Action:
+                    - "ecr:PutImage"
+                    - "ecr:UploadLayerPart"
+                    - "ecr:CompleteLayerUpload"
+                    - "ecr:InitiateLayerUpload"
+                    - "ecr:BatchCheckLayerAvailability"
+                    - "ecr:TagResource"
+                    - "ecr:UntagResource"
+                  Resource:
+                    - !GetAtt ECRRepository.Arn
+                -
+                  Effect: "Allow"
+                  Action:
+                    - "states:DeleteStateMachine"
+                    - "states:UntagResource"
+                    - "states:TagResource"
+                    - "states:CreateStateMachine"
+                    - "states:UpdateStateMachine"
+                  Resource:
+                    - !Sub arn:aws:states:${AWS::Region}:${AWS::AccountId}:*
+                -
+                  Effect: "Allow"
+                  Action:
+                    - "ssm:GetParameters"
+                    - "ssm:GetParameter"
+                    - "ssm:PutParameter"
+                    - "ssm:DeleteParameter"
+                    - "ssm:DeleteParameters"
+                    - "ssm:AddTagsToResource"
+                    - "ssm:RemoveTagsFromResource"
+                  Resource:
+                    - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/*
+                -
+                  Effect: "Allow"
+                  Action:
+                    - "sns:CreateTopic"
+                    - "sns:DeleteTopic"
+                    - "sns:Subscribe"
+                    - "sns:UnSubscribe"
+                    - "sns:ListTopics"
+                  Resource:
+                    - !Sub arn:aws:sns:${AWS::Region}:${AWS::AccountId}:*
+                -
+                  Effect: "Allow"
+                  Action:
+                    - "amplify:UntagResource"
+                    - "amplify:DeleteBranch"
+                    - "amplify:CreateDeployment"
+                    - "amplify:CreateBranch"
+                    - "amplify:UpdateBranch"
+                    - "amplify:DeleteApp"
+                    - "amplify:ListBranches"
+                    - "amplify:GetBranch"
+                    - "amplify:StartDeployment"
+                    - "amplify:CreateApp"
+                    - "amplify:TagResource"
+                    - "amplify:GetApp"
+                    - "amplify:UpdateApp"
+                  Resource:
+                    - !Sub arn:aws:amplify:${AWS::Region}:${AWS::AccountId}:*
+                -
+                  Effect: "Allow"
+                  Action:
+                    - "ec2:DescribeInternetGateways"
+                    - "ec2:DescribeVpcs"
+                    - "ec2:DeleteInternetGateway"
+                    - "ecs:CreateCluster"
+                    - "ec2:DescribeSecurityGroups"
+                    - "ec2:DescribeSecurityGroupReferences"
+                    - "ec2:DescribeSubnets"
+                    - "ec2:DescribeRouteTables"
+                    - "ecs:DescribeClusters"
+                    - "ecs:RegisterTaskDefinition"
+                    - "ecs:DeregisterTaskDefinition"
+                    - "ssm:DescribeParameters"
+                  Resource:
+                    - "*"
+
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub CodeBuildServiceRole-${AWS::StackName}
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "codebuild.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: /
+      Policies:
+          -
+            PolicyName:
+              Fn::Sub: CodeBuildServiceRole-${AWS::StackName}-Policy
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                -
+                  Effect: "Allow"
+                  Action:
+                    - "codecommit:ListBranches"
+                    - "codecommit:ListRepositories"
+                    - "codecommit:BatchGetRepositories"
+                    - "codecommit:Get*"
+                    - "codecommit:GitPull"
+                    - "codecommit:GitPush"
+                  Resource:
+                    - !Sub arn:aws:codecommit:${AWS::Region}:${AWS::AccountId}:${RepositoryName}
+                -
+                  Effect: "Allow"
+                  Action:
+                    - "logs:CreateLogGroup"
+                    - "logs:CreateLogStream"
+                    - "logs:PutLogEvents"
+                  Resource:
+                    - Fn::Sub: arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*
+                -
+                  Effect: "Allow"
+                  Action:
+                    - "s3:PutObject"
+                    - "s3:GetObject"
+                    - "s3:GetObjectVersion"
+                    - "s3:ListBucket"
+                  Resource:
+                    - !Sub arn:aws:s3:::${AWS::StackName}-test-output-${AWS::AccountId}-${AWS::Region}/*
+                    - !Sub arn:aws:s3:::${AWS::StackName}-test-output-${AWS::AccountId}-${AWS::Region}
+                    - !Sub arn:aws:s3:::${AWS::StackName}-codepipeline-artifact-${AWS::AccountId}-${AWS::Region}/*
+                    - !Sub arn:aws:s3:::${AWS::StackName}-codepipeline-artifact-${AWS::AccountId}-${AWS::Region}
+                    - !Sub arn:aws:s3:::codepipeline-${AWS::Region}-*
+                -
+                  Effect: "Allow"
+                  Action:
+                    - "amplify:StartJob"
+                  Resource:
+                    - !Sub arn:aws:amplify:${AWS::Region}:${AWS::AccountId}:apps/${TestApp.AppId}/branches/master/jobs/*
+                    - !Sub arn:aws:amplify:${AWS::Region}:${AWS::AccountId}:apps/${StatusPage.AppId}/branches/master/jobs/*
+                -
+                  Effect: "Allow"
+                  Action:
+                    - "ecr:PutImage"
+                    - "ecr:UploadLayerPart"
+                    - "ecr:CompleteLayerUpload"
+                    - "ecr:InitiateLayerUpload"
+                    - "ecr:BatchCheckLayerAvailability"
+                  Resource:
+                    - !GetAtt ECRRepository.Arn
+                -
+                  Effect: "Allow"
+                  Action:
+                    - "iam:PassRole"
+                    - "ecr:GetAuthorizationToken"
+                    - "ssm:PutParameter"
+                  Resource:
+                    - "*"
+
+  BuildContainerProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub SUIT-${AWS::StackName}-BuildContainerProject
+      Description: Project to build containers and prepare the application
+      ServiceRole: !GetAtt [ CodeBuildServiceRole, Arn ]
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:3.0
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: AWS_ACCOUNT_ID
+            Value: !Ref AWS::AccountId
+          - Name: IMAGE_REPO_NAME
+            Value: !Ref ECRRepository
+          - Name: Cognito_IDP_ID
+            Value: !Ref StatusPageCognitoIP
+          - Name: RepositoryName
+            Value: !Ref RepositoryName
+          - Name: DDB_STATUS_TABLE
+            Value: !Ref StatusTable
+      Source:
+        Type: CODEPIPELINE
+      TimeoutInMinutes: 15
+      Cache:
+        Type: LOCAL
+        Modes:
+          - LOCAL_DOCKER_LAYER_CACHE
+      Tags:
+        - Key: Name
+          Value: !Sub SUIT-${AWS::StackName}-BuildContainerProject
+
+  CodePipelineRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: !Sub SUIT-CodePipelineRole-${AWS::StackName}
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "codepipeline.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: /
+      Policies:
+        -
+          PolicyName: !Sub SUIT-CodePipelineRole-${AWS::StackName}-Policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action:
+                  - "s3:DeleteObject"
+                  - "s3:GetObject"
+                  - "s3:GetObjectVersion"
+                  - "s3:ListBucket"
+                  - "s3:PutObject"
+                  - "s3:GetBucketPolicy"
+                Resource:
+                  - !Sub arn:aws:s3:::${CodePipelineArtifact}
+                  - !Sub arn:aws:s3:::${CodePipelineArtifact}/*
+              -
+                Effect: "Allow"
+                Action:
+                  - "codecommit:ListBranches"
+                  - "codecommit:ListRepositories"
+                  - "codecommit:BatchGetRepositories"
+                  - "codecommit:Get*"
+                  - "codecommit:GitPull"
+                  - "codecommit:UploadArchive"
+                Resource:
+                  - !Sub arn:aws:codecommit:${AWS::Region}:${AWS::AccountId}:${RepositoryName}
+              -
+                Effect: "Allow"
+                Action:
+                  - "codebuild:StartBuild"
+                  - "codebuild:BatchGetBuilds"
+                Resource:
+                  - !GetAtt BuildContainerProject.Arn
+                  - !Sub ${BuildContainerProject.Arn}:*
+              -
+                Effect: "Allow"
+                Action:
+                  - "cloudformation:ListStacks"
+                  - "cloudformation:CancelUpdateStack"
+                  - "cloudformation:DescribeStackResources"
+                  - "cloudformation:DescribeStackResource"
+                  - "cloudformation:CreateChangeSet"
+                  - "cloudformation:DeleteChangeSet"
+                  - "cloudformation:DescribeStacks"
+                  - "cloudformation:ContinueUpdateRollback"
+                  - "cloudformation:CreateStack"
+                  - "cloudformation:DeleteStack"
+                  - "cloudformation:UpdateStack"
+                  - "cloudformation:DescribeChangeSet"
+                  - "cloudformation:ExecuteChangeSet"
+                  - "cloudformation:ValidateTemplate"
+                  - "cloudformation:ListChangeSets"
+                Resource:
+                  - !Sub arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/*
+              -
+                Effect: "Allow"
+                Action:
+                  - "states:StartExecution"
+                  - "states:DescribeActivity"
+                  - "states:DescribeStateMachine"
+                  - "states:DescribeExecution"
+                  - "states:CreateActivity"
+                  - "states:GetExecutionHistory"
+                  - "states:StartExecution"
+                  - "states:DeleteActivity"
+                  - "states:StopExecution"
+                  - "states:GetActivityTask"
+                Resource:
+                  - !Sub arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:SUIT-*
+                  - !Sub arn:aws:states:${AWS::Region}:${AWS::AccountId}:execution:SUIT-*
+              -
+                Effect: "Allow"
+                Action:
+                  - "sns:Publish"
+                Resource:
+                  - !Ref ApprovalTopic
+              -
+                  Effect: "Allow"
+                  Action:
+                    - "iam:PassRole"
+                  Resource:
+                    - "*"
+
+  ServerlessUITestPipeline:
+    Type: "AWS::CodePipeline::Pipeline"
+    Properties:
+      Name: !Sub ServerlessUITestPipeline-${AWS::StackName}
+      RoleArn: !GetAtt [ CodePipelineRole, Arn ]
+      Stages:
+        -
+          Name: Source
+          Actions:
+            -
+              Name: SUITestSource
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Version: "1"
+                Provider: CodeCommit
+              OutputArtifacts:
+                -
+                  Name: SUITestSourceOutput
+              Configuration:  
+                BranchName: master
+                RepositoryName: !Ref RepositoryName
+              RunOrder: 1
+        -
+          Name: Build
+          Actions:
+            -
+              Name: BuildContainer
+              InputArtifacts:
+                - Name: SUITestSourceOutput
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: "1"
+                Provider: CodeBuild
+              OutputArtifacts:
+                -
+                  Name: BuildContainerArtifact
+              Configuration:
+                ProjectName: !Ref BuildContainerProject
+              RunOrder: 1
+        -
+          Name: Test
+          Actions:
+            -
+              Name: DeployTestEnv
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Version: "1"
+                Provider: CloudFormation
+              InputArtifacts:
+                - Name: SUITestSourceOutput
+              Configuration:
+                ActionMode: CREATE_UPDATE
+                Capabilities: CAPABILITY_NAMED_IAM
+                RoleArn: !GetAtt CFNDeployRole.Arn
+                StackName: !Sub SUIT-Test-Stack-${AWS::StackName}
+                TemplatePath: SUITestSourceOutput::deployment.yaml
+              OutputArtifacts:
+                -
+                  Name: TestEnvDeploy
+              Region: !Ref AWS::Region
+              RunOrder: 1
+            -
+              Name: Run-Mod1-Test
+              Namespace: TestVariables
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Version: "1"
+                Provider: StepFunctions
+              InputArtifacts:
+                - Name: TestEnvDeploy
+              Configuration:
+                ExecutionNamePrefix: suit
+                Input: '{"DDBKey":{"ModId":{"S":"mod1"}}}'
+                StateMachineArn: !Sub arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:SUIT-StateMachine
+              OutputArtifacts:
+                -
+                  Name: Mod1TestOut
+              Region: !Ref AWS::Region
+              RunOrder: 2
+        -
+          Name: Approval
+          Actions:
+            -
+              Name: DeployApproval
+              ActionTypeId:
+                Category: Approval
+                Owner: AWS
+                Version: 1
+                Provider: Manual
+              Configuration:
+                NotificationArn: !Ref ApprovalTopic
+                ExternalEntityLink: !Sub https://master.${StatusPage.DefaultDomain}/?earn=#{TestVariables.ExecutionArn}
+                CustomData: Approve production deployment after validating the test status.
+              RunOrder: 1
+        -
+          Name: ProdDeploy
+          Actions:
+            -
+              Name: DeployProd
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Version: "1"
+                Provider: CloudFormation
+              InputArtifacts:
+                - Name: SUITestSourceOutput
+              Configuration:
+                ActionMode: CREATE_UPDATE
+                Capabilities: CAPABILITY_NAMED_IAM
+                RoleArn: !GetAtt CFNDeployRole.Arn
+                StackName: !Sub SUIT-Prod-Stack-${AWS::StackName}
+                TemplatePath: SUITestSourceOutput::prod-deploy.yaml
+              OutputArtifacts:
+                -
+                  Name: ProdDeploy
+              Region: !Ref AWS::Region
+              RunOrder: 1
+      ArtifactStore:
+        Type: S3
+        Location:
+          Ref: CodePipelineArtifact
+
+Outputs:
+  TestWebsite:
+    Description: "URL of Test Website"
+    Value: !Sub https://master.${TestApp.DefaultDomain}
+
+  StatusWebsite:
+    Description: "URL of Status Website"
+    Value: !Sub https://master.${StatusPage.DefaultDomain}
+

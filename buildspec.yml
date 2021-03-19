@@ -1,0 +1,39 @@
+version: 0.2
+
+phases:
+  pre_build:
+    commands:
+      - echo Logging in to Amazon ECR...
+      - git config --global credential.helper '!aws codecommit credential-helper $@'
+      - git config --global credential.UseHttpPath true
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+  build:
+    commands:
+      - echo Build started on `date`
+      - echo Building the Docker image...        
+      - IMAGE_TAG=`echo $CODEBUILD_BUILD_ID | awk -F ':' '{print $2}'`  
+      - docker build -t $IMAGE_REPO_NAME:$IMAGE_TAG .
+      - docker tag $IMAGE_REPO_NAME:$IMAGE_TAG $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:$IMAGE_TAG
+  post_build:
+    commands:
+      - echo Build completed on `date`
+      - echo Pushing the Docker image...
+      - docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:$IMAGE_TAG
+      - aws ssm put-parameter --name suit-container-image --value $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:$IMAGE_TAG --type String --overwrite
+      - git clone https://git-codecommit.$AWS_DEFAULT_REGION.amazonaws.com/v1/repos/$RepositoryName
+      - cd $RepositoryName
+      - |
+        if [ -f "status/generatetable.js.temp" ]; then
+          sed "s/Cognito_IDP_ID/$Cognito_IDP_ID/" status/generatetable.js.temp > status/generatetable.js
+          sed -i "s/AWS_REGION/$AWS_DEFAULT_REGION/" status/generatetable.js
+          sed -i "s/DDB_STATUS_TABLE/$DDB_STATUS_TABLE/" status/generatetable.js
+          git config --local user.name "CodeBuild"
+          git config --local user.email "codebuild@no-reply.com"
+          git add status/generatetable.js
+          git rm status/generatetable.js.temp
+          git commit -m "Updated region, DDB Table & Cognito IDP"
+          git branch tmp
+          git checkout master
+          git merge tmp
+          git push origin HEAD:master
+        fi

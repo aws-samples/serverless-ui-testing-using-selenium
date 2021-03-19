@@ -1,0 +1,185 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: "AWS CloudFormation Template to deploy Serverless UI Testing (SUIT) demo application"
+
+Parameters:
+  RepositoryName:
+    Description: Enter the name of the container to be used
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: WebAppSourceRepo
+
+Resources:
+  AmplifyAccessRole:
+    Type: AWS::IAM::Role
+    Properties:
+        RoleName: !Sub SUIT-${AWS::StackName}-Prod-AmplifyRole
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            -
+              Effect: "Allow"
+              Principal:
+                Service:
+                  - amplify.amazonaws.com
+              Action:
+                - sts:AssumeRole
+        Path: /
+        Policies:
+          -
+            PolicyName: !Sub SUIT-${AWS::StackName}-Prod-AmplifyRole-Policy
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                -
+                  Effect: "Allow"
+                  Action:
+                    - "codecommit:GitPull"
+                  Resource:
+                    - !Sub arn:aws:codecommit:${AWS::Region}:${AWS::AccountId}:${RepositoryName}
+                -
+                  Effect: "Allow"
+                  Action:
+                    - "logs:CreateLogGroup"
+                    - "logs:CreateLogStream"
+                    - "logs:PutLogEvents"
+                  Resource:
+                    - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/amplify/*
+ 
+  ProdApp:
+    Type: AWS::Amplify::App
+    Properties: 
+      Name: ProdAppWebsite
+      Repository: !Sub https://git-codecommit.${AWS::Region}.amazonaws.com/v1/repos/${RepositoryName}
+      BuildSpec: |
+        version: 1
+        applications:
+          - frontend:
+              phases:
+                build:
+                  commands: []
+              artifacts:
+                baseDirectory: /
+                files:
+                  - '**/*'
+              cache:
+                paths: []
+            appRoot: website
+      IAMServiceRole: !GetAtt AmplifyAccessRole.Arn
+      CustomRules:
+        - Target: /index.html
+          Source: "/<*>"
+          Status: "404-200"
+      Tags: 
+        - Key: Application
+          Value: !Ref AWS::StackId
+        - Key: Name
+          Value: ProdAppWebsite
+
+  ProdAppBranch:
+    Type: AWS::Amplify::Branch
+    Properties: 
+      AppId: !GetAtt ProdApp.AppId
+      BranchName: master
+      Description: Master branch for App
+      EnableAutoBuild: true
+      Stage: PRODUCTION
+      Tags: 
+        - Key: Application
+          Value: !Ref AWS::StackId
+        - Key: Name
+          Value: ProdAppBranch
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+        RoleName: !Sub SUIT-${AWS::StackName}-Prod-LambdaExecutionRole
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            -
+              Effect: "Allow"
+              Principal:
+                Service:
+                  - lambda.amazonaws.com
+              Action:
+                - sts:AssumeRole
+        Path: /
+        ManagedPolicyArns:
+          - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        Policies:
+          -
+            PolicyName: !Sub SUIT-${AWS::StackName}-Prod-LambdaExecutionRole-Policy
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                -
+                  Effect: "Allow"
+                  Action:
+                    - "amplify:StartJob"
+                  Resource:
+                    - !Sub arn:aws:amplify:${AWS::Region}:${AWS::AccountId}:apps/${ProdApp.AppId}/branches/*
+  
+  TriggerDeploymentLambda:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import cfnresponse
+
+          amplify = boto3.client('amplify')
+
+          def lambda_handler(event, context):
+              try:
+                  if event['RequestType'] == 'Delete' or event['RequestType'] == 'Change':
+                      cfnresponse.send(event,
+                                      context,
+                                      cfnresponse.SUCCESS,
+                                      {})
+                      return 0
+                  elif event['RequestType'] == 'Create':
+                      amplify.start_job(appId=event['ResourceProperties']['appId'],
+                                        branchName=event['ResourceProperties']['branchName'],
+                                        jobType='RELEASE')
+
+                      responseData = {'Success': 'Successfully triggered deployment'}
+                      cfnresponse.send(event,
+                                      context,
+                                      cfnresponse.SUCCESS,
+                                      responseData)
+              except Exception as e:
+                  print('Received client error: %s' % e)
+                  responseData = {'Failed': 'Received client error: %s' % e}
+                  cfnresponse.send(event,
+                                  context,
+                                  cfnresponse.SUCCESS,
+                                  responseData)
+
+      Description: Lambda function that will start Amplify deployment.
+      FunctionName: !Sub SUIT-${AWS::StackName}-Prod-DeployAmplifyApp
+      Handler: index.lambda_handler
+      Role : !GetAtt LambdaExecutionRole.Arn
+      Runtime: python3.8
+      Timeout: 85
+
+  TriggerDeployment:
+    Type: Custom::TriggerDeployment
+    Properties:
+      ServiceToken: !GetAtt [ TriggerDeploymentLambda, Arn ]
+      appId: !GetAtt ProdApp.AppId
+      branchName: !GetAtt ProdAppBranch.BranchName
+
+  ProdAppDomainParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: ProdAppURL
+      Type: String
+      Value: !Sub https://master.${ProdApp.DefaultDomain}
+      Description: URL of production website
+
+Outputs:
+  ProdWebsite:
+    Description: "URL of Prod Website"
+    Value: !Sub https://master.${ProdApp.DefaultDomain}

@@ -1,0 +1,4 @@
+pyvirtualdisplay
+awslambdaric
+selenium
+boto3

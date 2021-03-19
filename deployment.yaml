@@ -1,0 +1,771 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: "AWS CloudFormation Template to deploy Serverless UI Testing (SUIT) demo application"
+
+Parameters:
+  ContainerName:
+    Description: Enter the name of the container to be used
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: suit-container-image
+  ModulesTable:
+    Description: Enter the name of the Modules Table
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: ModulesTable
+  StatusTable:
+    Description: Enter the name of the Status Table
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: StatusTable
+  TestOutputBucket:
+    Description: Enter the name of the Status Table
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: TestOutputBucket
+  CodePipelineArtifact:
+    Description: Enter the name of the Status Table
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: CodePipelineArtifact
+  TestAppDomain:
+    Description: Enter the name of the Status Table
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: TestAppDomain
+  
+Resources:
+  VPC: 
+    Type: AWS::EC2::VPC
+    Properties: 
+      CidrBlock: "10.0.0.0/16"
+      Tags: 
+        - Key: Application
+          Value: !Ref AWS::StackId
+        - Key: Name
+          Value: !Sub SUIT-VPC-${AWS::StackName}
+
+  PublicSubnetA: 
+    Type: AWS::EC2::Subnet
+    Properties: 
+      VpcId: !Ref VPC
+      CidrBlock: "10.0.0.0/24"
+      AvailabilityZone: !Sub ${AWS::Region}a
+      MapPublicIpOnLaunch: true
+      Tags: 
+        - Key: Application
+          Value: !Ref AWS::StackId
+        - Key: Name
+          Value: SUIT-PublicSubnetA
+
+  PublicSubnetB: 
+    Type: AWS::EC2::Subnet
+    Properties: 
+      VpcId: !Ref VPC
+      CidrBlock: "10.0.1.0/24"
+      AvailabilityZone: !Sub ${AWS::Region}b
+      MapPublicIpOnLaunch: true
+      Tags: 
+        - Key: Application
+          Value: !Ref AWS::StackId
+        - Key: Name
+          Value: SUIT-PublicSubnetB
+
+  PublicSubnetC: 
+    Type: AWS::EC2::Subnet
+    Properties: 
+      VpcId: !Ref VPC
+      CidrBlock: "10.0.2.0/24"
+      AvailabilityZone: !Sub ${AWS::Region}c
+      MapPublicIpOnLaunch: true
+      Tags: 
+        - Key: Application
+          Value: !Ref AWS::StackId
+        - Key: Name
+          Value: SUIT-PublicSubnetC
+
+  InternetGateway: 
+    Type: AWS::EC2::InternetGateway
+    Properties: 
+      Tags: 
+        - Key: Application
+          Value: !Ref AWS::StackId
+        - Key: Name
+          Value: SUIT-IGW
+
+  AttachGateway: 
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties: 
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicRouteTable: 
+    Type: AWS::EC2::RouteTable
+    Properties: 
+      VpcId: !Ref VPC
+      Tags: 
+        - Key: Application
+          Value: !Ref AWS::StackId
+        - Key: Name
+          Value: SUIT-PublicRouteTable
+  
+  PublicRoute: 
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties: 
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: "0.0.0.0/0"
+      GatewayId: !Ref InternetGateway
+  
+  SubnetARouteTableAssociation: 
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: 
+      SubnetId: !Ref PublicSubnetA
+      RouteTableId: !Ref PublicRouteTable
+
+  SubnetBRouteTableAssociation: 
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: 
+      SubnetId: !Ref PublicSubnetB
+      RouteTableId: !Ref PublicRouteTable
+
+  SubnetCRouteTableAssociation: 
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: 
+      SubnetId: !Ref PublicSubnetC
+      RouteTableId: !Ref PublicRouteTable
+
+  ServerlessCluster:
+    Type: 'AWS::ECS::Cluster'
+    Properties:
+      ClusterName: !Sub ServerlessCluster-${AWS::StackName}
+
+  ECSTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+        RoleName: !Sub SUIT-${AWS::StackName}-ECSTaskExecutionRole
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            -
+              Effect: "Allow"
+              Principal:
+                Service:
+                  - ecs-tasks.amazonaws.com
+              Action:
+                - sts:AssumeRole
+        Path: /
+        ManagedPolicyArns:
+          - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  ECSTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+        RoleName: !Sub SUIT-${AWS::StackName}-ECSTaskRole
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            -
+              Effect: "Allow"
+              Principal:
+                Service:
+                  - ecs-tasks.amazonaws.com
+              Action:
+                - sts:AssumeRole
+        Path: /
+        Policies:
+          -
+            PolicyName: !Sub SUIT-${AWS::StackName}-ECSTaskRole-Policy
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                -
+                  Effect: "Allow"
+                  Action:
+                    - "s3:PutObject"
+                    - "s3:GetObject"
+                    - "s3:GetObjectVersion"
+                    - "s3:ListBucket"
+                  Resource:
+                    - !Sub arn:aws:s3:::${TestOutputBucket}/*
+                    - !Sub arn:aws:s3:::${TestOutputBucket}
+                    - !Sub arn:aws:s3:::${CodePipelineArtifact}/*
+                    - !Sub arn:aws:s3:::${CodePipelineArtifact}
+                    - !Sub arn:aws:s3:::codepipeline-${AWS::Region}-*
+                -
+                  Effect: "Allow"
+                  Action:
+                    - "dynamodb:GetItem"
+                    - "dynamodb:PutItem"
+                    - "dynamodb:UpdateItem"
+                  Resource:
+                    - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${StatusTable}
+                -
+                  Effect: "Allow"
+                  Action:
+                    - "states:SendTaskSuccess"
+                  Resource:
+                    - "*"
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+        RoleName: !Sub SUIT-${AWS::StackName}-LambdaExecutionRole
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            -
+              Effect: "Allow"
+              Principal:
+                Service:
+                  - lambda.amazonaws.com
+              Action:
+                - sts:AssumeRole
+        Path: /
+        ManagedPolicyArns:
+          - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        Policies:
+          -
+            PolicyName: !Sub SUIT-${AWS::StackName}-LambdaExecutionRole-Policy
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                -
+                  Effect: "Allow"
+                  Action:
+                    - "s3:PutObject"
+                    - "s3:GetObject"
+                    - "s3:GetObjectVersion"
+                    - "s3:ListBucket"
+                  Resource:
+                    - !Sub arn:aws:s3:::${TestOutputBucket}/*
+                    - !Sub arn:aws:s3:::${TestOutputBucket}
+                    - !Sub arn:aws:s3:::${CodePipelineArtifact}/*
+                    - !Sub arn:aws:s3:::${CodePipelineArtifact}
+                    - !Sub arn:aws:s3:::codepipeline-${AWS::Region}-*
+                -
+                  Effect: "Allow"
+                  Action:
+                    - "dynamodb:GetItem"
+                    - "dynamodb:PutItem"
+                    - "dynamodb:UpdateItem"
+                  Resource:
+                    - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${StatusTable}
+                -
+                  Effect: "Allow"
+                  Action:
+                    - "ecr:GetRepositoryPolicy"
+                    - "ecr:SetRepositoryPolicy"
+                    - "ecr:DeleteRepositoryPolicy"
+                    - "ecr:BatchGetImage"
+                    - "ecr:GetDownloadUrlForLayer"
+                  Resource:
+                    - !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:"*"
+  
+  UpdateModulesLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+        RoleName: !Sub SUIT-${AWS::StackName}-UpdateModulesLambdaRole
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            -
+              Effect: "Allow"
+              Principal:
+                Service:
+                  - lambda.amazonaws.com
+              Action:
+                - sts:AssumeRole
+        Path: /
+        ManagedPolicyArns:
+          - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        Policies:
+          -
+            PolicyName: !Sub SUIT-${AWS::StackName}-UpdateModulesLambdaRole-Policy
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                -
+                  Effect: "Allow"
+                  Action:
+                    - "dynamodb:PutItem"
+                    - "dynamodb:UpdateItem"
+                  Resource:
+                    - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ModulesTable}
+
+  SfnExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+        RoleName: !Sub SUIT-${AWS::StackName}-SfnExecutionRole
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            -
+              Effect: "Allow"
+              Principal:
+                Service:
+                  - states.amazonaws.com
+              Action:
+                - sts:AssumeRole
+        Path: /
+        Policies:
+          -
+            PolicyName: !Sub SUIT-${AWS::StackName}-SfnExecutionRole-Policy
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                -
+                  Effect: "Allow"
+                  Action:
+                    - "ecs:RunTask"
+                    - "lambda:InvokeFunction"
+                    - "dynamodb:GetItem"
+                  Resource:
+                    - !Ref ServerlessFirefoxECSTask
+                    - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ModulesTable}
+                    - !Sub ${ServerlessChromeStable.Arn}:*
+                    - !Sub ${ServerlessChromeBeta.Arn}:*
+                    - !Sub ${ServerlessChromeVideo.Arn}:*
+                -
+                  Effect: "Allow"
+                  Action:
+                    - "iam:PassRole"
+                  Resource:
+                    - !GetAtt ECSTaskRole.Arn
+                    - !GetAtt ECSTaskExecutionRole.Arn
+
+  UpdateModulesLambda:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import cfnresponse
+
+          ddb = boto3.client('dynamodb')
+
+          def lambda_handler(event, context):
+              try:
+                  if event['RequestType'] == 'Delete' or event['RequestType'] == 'Change':
+                      cfnresponse.send(event,
+                                      context,
+                                      cfnresponse.SUCCESS,
+                                      {})
+                      return 0
+                  elif event['RequestType'] == 'Create':
+                      ddb_table = event['ResourceProperties']['Table']
+                      for module in event['ResourceProperties']['Modules']:
+                          ddb.put_item(TableName=ddb_table,Item=json.loads(module))
+
+                      responseData = {'Success': 'Successfully updated DynamoDB Table'}
+                      cfnresponse.send(event,
+                                      context,
+                                      cfnresponse.SUCCESS,
+                                      responseData)
+
+              except Exception as e:
+                  print('Received client error: %s' % e)
+                  responseData = {'Failed': 'Received client error: %s' % e}
+                  cfnresponse.send(event,
+                                  context,
+                                  cfnresponse.SUCCESS,
+                                  responseData)
+      Description: Lambda function that will update Modules DynamoDB table.
+      FunctionName: !Sub SUIT-${AWS::StackName}-UpdateModules
+      Handler: index.lambda_handler
+      Role : !GetAtt UpdateModulesLambdaRole.Arn
+      Runtime: python3.8
+      Timeout: 90
+
+  UpdateModules:
+    Type: Custom::UpdateModules
+    Properties:
+      ServiceToken: !GetAtt [ UpdateModulesLambda, Arn ]
+      Table: !Ref ModulesTable
+      Modules:
+        - '{"ModId":{"S":"mod1"},"TestCases":{"L":[{"S":"tc0001"},{"S":"tc0003"},{"S":"tc0005"},{"S":"tc0007"}]}}'
+        - '{"ModId":{"S":"mod2"},"TestCases":{"L":[{"S":"tc0002"},{"S":"tc0004"},{"S":"tc0006"}]}}'
+        - '{"ModId":{"S":"mod3"},"TestCases":{"L":[{"S":"tc0003"},{"S":"tc0006"}]}}'
+        - '{"ModId":{"S":"mod4"},"TestCases":{"L":[{"S":"tc0001"},{"S":"tc0002"},{"S":"tc0003"},{"S":"tc0005"}]}}'
+        - '{"ModId":{"S":"mod5"},"TestCases":{"L":[{"S":"tc0002"},{"S":"tc0003"},{"S":"tc0005"},{"S":"tc0007"}]}}'
+
+  ServerlessFirefoxLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /${AWS::StackName}/ServerlessFirefox
+      RetentionInDays: 3
+
+  ServerlessFirefoxECSTask:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Cpu: "1024"
+      Memory: "2048"
+      ContainerDefinitions: 
+        - Name: suit-serverless-firefox
+          Image: !Ref ContainerName
+          Essential: true
+          EntryPoint:
+            - /var/lang/bin/python
+            - "-c"
+            - "from app import container_handler; container_handler()"
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-region: !Ref AWS::Region
+              awslogs-group: !Ref ServerlessFirefoxLogGroup
+              awslogs-stream-prefix: suit
+          Environment:
+            - Name: BROWSER
+              Value: Firefox
+            - Name: WebURL
+              Value: !Sub https://master.${TestAppDomain}
+            - Name: StatusTable
+              Value: !Ref StatusTable
+            - Name: s3buck
+              Value: !Ref TestOutputBucket
+            - Name: s3prefix
+              Value: !Sub ${AWS::StackName}/
+            - Name: AWS_DEFAULT_REGION
+              Value: !Ref AWS::Region
+      ExecutionRoleArn: !GetAtt ECSTaskExecutionRole.Arn
+      Family: suit-serverless-firefox
+      NetworkMode: awsvpc
+      RequiresCompatibilities: 
+        - FARGATE
+      Tags: 
+        - Key: Application
+          Value: !Ref AWS::StackId
+        - Key: Name
+          Value: suit-serverless-firefox
+      TaskRoleArn: !GetAtt ECSTaskRole.Arn
+
+  ExecutionSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+        GroupDescription: Allow outbound access
+        VpcId: !Ref VPC
+        SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+
+  ServerlessChromeStable:
+    Type: AWS::Lambda::Function
+    Properties: 
+      Code: 
+        ImageUri: !Ref ContainerName
+      Description: Lambda function to run Chrome Browser Stable and UI Tests
+      ImageConfig:
+        EntryPoint:
+          - /var/lang/bin/python
+          - "-m"
+          - awslambdaric
+        Command:
+          - app.lambda_handler
+      Environment: 
+        Variables:
+          BROWSER: Chrome
+          BROWSER_VERSION: "88.0.4324.150"
+          DRIVER_VERSION: "88.0.4324.96"
+      FunctionName: !Sub SUIT-${AWS::StackName}-ChromeStable
+      MemorySize: 1024
+      PackageType: Image
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Tags: 
+        - Key: Application
+          Value: !Ref AWS::StackId
+        - Key: Name
+          Value: !Sub SUIT-${AWS::StackName}-ChromeStable
+      Timeout: 303
+
+  ServerlessChromeBeta:
+    Type: AWS::Lambda::Function
+    Properties: 
+      Code: 
+        ImageUri: !Ref ContainerName
+      Description: Lambda function to run Chrome Browser Beta and UI Tests
+      ImageConfig:
+        EntryPoint:
+          - /var/lang/bin/python
+          - "-m"
+          - awslambdaric
+        Command:
+          - app.lambda_handler
+      Environment: 
+        Variables:
+          BROWSER: Chrome
+          BROWSER_VERSION: "89.0.4389.47"
+          DRIVER_VERSION: "89.0.4389.23"
+      FunctionName: !Sub SUIT-${AWS::StackName}-ChromeBeta
+      MemorySize: 1024
+      PackageType: Image
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Tags: 
+        - Key: Application
+          Value: !Ref AWS::StackId
+        - Key: Name
+          Value: !Sub SUIT-${AWS::StackName}-ChromeBeta
+      Timeout: 303
+
+  ServerlessChromeVideo:
+    Type: AWS::Lambda::Function
+    Properties: 
+      Code: 
+        ImageUri: !Ref ContainerName
+      Description: Lambda function to run Chrome Browser Stable and UI Tests
+      ImageConfig:
+        EntryPoint:
+          - /var/lang/bin/python
+          - "-m"
+          - awslambdaric
+        Command:
+          - app.lambda_handler
+      Environment: 
+        Variables:
+          BROWSER: Chrome
+          BROWSER_VERSION: "88.0.4324.150"
+          DRIVER_VERSION: "88.0.4324.96"
+          DISPLAY: ":25"
+      FunctionName: !Sub SUIT-${AWS::StackName}-ChromeVideo
+      MemorySize: 2048
+      PackageType: Image
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Tags: 
+        - Key: Application
+          Value: !Ref AWS::StackId
+        - Key: Name
+          Value: !Sub SUIT-${AWS::StackName}-ChromeVideo
+      Timeout: 303
+
+  AutomatedTestingStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: SUIT-StateMachine
+      Definition: 
+        Comment: SUIT State Machine
+        StartAt: Get Test Cases
+        States:
+          Get Test Cases:
+            Type: Task
+            Resource: arn:aws:states:::dynamodb:getItem
+            Parameters:
+              TableName: !Ref ModulesTable
+              Key.$: $.DDBKey
+            Next: Run Tests
+          Run Tests:
+            Type: Parallel
+            Branches:
+              - 
+                StartAt: Test Chrome Stable
+                States:
+                  Test Chrome Stable:
+                    Type: Map
+                    MaxConcurrency: 0
+                    ItemsPath: $.Item.TestCases.L
+                    Iterator:
+                      StartAt: Chrome Stable
+                      States:
+                        Chrome Stable:
+                          Type: Task
+                          Resource: arn:aws:states:::lambda:invoke
+                          Parameters:
+                            FunctionName: !Sub ${ServerlessChromeStable.Arn}:$LATEST
+                            Payload:
+                              tcname.$: $.S
+                              module.$: $$.Execution.Input.DDBKey.ModId.S
+                              testrun.$: $$.Execution.Id
+                              s3buck: !Ref TestOutputBucket
+                              s3prefix: !Sub ${AWS::StackName}/
+                              WebURL: !Sub https://master.${TestAppDomain}
+                              StatusTable: !Ref StatusTable
+                          End: true
+                    End: true
+              - 
+                StartAt: Test Chrome Beta
+                States:
+                  Test Chrome Beta:
+                    Type: Map
+                    MaxConcurrency: 0
+                    ItemsPath: $.Item.TestCases.L
+                    Iterator:
+                      StartAt: Chrome Beta
+                      States:
+                        Chrome Beta:
+                          Type: Task
+                          Resource: 'arn:aws:states:::lambda:invoke'
+                          Parameters:
+                            FunctionName: !Sub ${ServerlessChromeBeta.Arn}:$LATEST
+                            Payload:
+                              tcname.$: $.S
+                              module.$: $$.Execution.Input.DDBKey.ModId.S
+                              testrun.$: $$.Execution.Id
+                              s3buck: !Ref TestOutputBucket
+                              s3prefix: !Sub ${AWS::StackName}/
+                              WebURL: !Sub https://master.${TestAppDomain}
+                              StatusTable: !Ref StatusTable
+                          End: true
+                    End: true
+              - 
+                StartAt: Chrome Video
+                States:
+                  Chrome Video:
+                    Type: Task
+                    Resource: 'arn:aws:states:::lambda:invoke'
+                    Parameters:
+                      FunctionName: !Sub ${ServerlessChromeVideo.Arn}:$LATEST
+                      Payload:
+                        tcname: tc0011
+                        module: mod7
+                        testrun.$: $$.Execution.Id
+                        s3buck: !Ref TestOutputBucket
+                        s3prefix: !Sub ${AWS::StackName}/
+                        WebURL: !Sub https://master.${TestAppDomain}
+                        StatusTable: !Ref StatusTable
+                    End: true
+              - 
+                StartAt: Test Firefox Stable
+                States:
+                  Test Firefox Stable:
+                    Type: Map
+                    MaxConcurrency: 0
+                    ItemsPath: $.Item.TestCases.L
+                    Iterator:
+                      StartAt: Firefox Stable
+                      States:
+                        Firefox Stable:
+                          Type: Task
+                          Resource: 'arn:aws:states:::ecs:runTask.waitForTaskToken'
+                          Parameters:
+                            LaunchType: FARGATE
+                            Cluster: !Sub ${ServerlessCluster.Arn}
+                            TaskDefinition: !Ref ServerlessFirefoxECSTask
+                            PlatformVersion: 1.4.0
+                            NetworkConfiguration:
+                              AwsvpcConfiguration:
+                                Subnets:
+                                  - !Ref PublicSubnetA
+                                  - !Ref PublicSubnetB
+                                  - !Ref PublicSubnetC
+                                AssignPublicIp: ENABLED
+                            Overrides:
+                              ContainerOverrides:
+                                - 
+                                  Name: suit-serverless-firefox
+                                  Environment:
+                                    - 
+                                      Name: TASK_TOKEN_ENV_VARIABLE
+                                      Value.$: $$.Task.Token
+                                    - 
+                                      Name: BROWSER_VERSION
+                                      Value: '86.0'
+                                    - 
+                                      Name: DRIVER_VERSION
+                                      Value: '0.29.0'
+                                    - 
+                                      Name: module
+                                      Value.$: $$.Execution.Input.DDBKey.ModId.S
+                                    - 
+                                      Name: tcname
+                                      Value.$: $.S
+                                    - 
+                                      Name: testrun
+                                      Value.$: $$.Execution.Id
+                          End: true
+                    End: true
+              - 
+                StartAt: Test Firefox Beta
+                States:
+                  Test Firefox Beta:
+                    Type: Map
+                    MaxConcurrency: 0
+                    ItemsPath: $.Item.TestCases.L
+                    Iterator:
+                      StartAt: Firefox Beta
+                      States:
+                        Firefox Beta:
+                          Type: Task
+                          Resource: 'arn:aws:states:::ecs:runTask.waitForTaskToken'
+                          Parameters:
+                            LaunchType: FARGATE
+                            Cluster: !Sub ${ServerlessCluster.Arn}
+                            TaskDefinition: !Ref ServerlessFirefoxECSTask
+                            PlatformVersion: 1.4.0
+                            NetworkConfiguration:
+                              AwsvpcConfiguration:
+                                Subnets:
+                                  - !Ref PublicSubnetA
+                                  - !Ref PublicSubnetB
+                                  - !Ref PublicSubnetC
+                                AssignPublicIp: ENABLED
+                            Overrides:
+                              ContainerOverrides:
+                                - 
+                                  Name: suit-serverless-firefox
+                                  Environment:
+                                    - 
+                                      Name: TASK_TOKEN_ENV_VARIABLE
+                                      Value.$: $$.Task.Token
+                                    - 
+                                      Name: BROWSER_VERSION
+                                      Value: 87.0b3
+                                    - 
+                                      Name: DRIVER_VERSION
+                                      Value: '0.29.0'
+                                    - 
+                                      Name: module
+                                      Value.$: $$.Execution.Input.DDBKey.ModId.S
+                                    - 
+                                      Name: tcname
+                                      Value.$: $.S
+                                    - 
+                                      Name: testrun
+                                      Value.$: $$.Execution.Id
+                          End: true
+                    End: true
+              - 
+                StartAt: Firefox Video
+                States:
+                  Firefox Video:
+                    Type: Task
+                    Resource: 'arn:aws:states:::ecs:runTask.waitForTaskToken'
+                    Parameters:
+                      LaunchType: FARGATE
+                      Cluster: !Sub ${ServerlessCluster.Arn}
+                      TaskDefinition: !Ref ServerlessFirefoxECSTask
+                      PlatformVersion: 1.4.0
+                      NetworkConfiguration:
+                        AwsvpcConfiguration:
+                          Subnets:
+                            - !Ref PublicSubnetA
+                            - !Ref PublicSubnetB
+                            - !Ref PublicSubnetC
+                          AssignPublicIp: ENABLED
+                      Overrides:
+                        ContainerOverrides:
+                          - 
+                            Name: suit-serverless-firefox
+                            Environment:
+                              - 
+                                Name: TASK_TOKEN_ENV_VARIABLE
+                                Value.$: $$.Task.Token
+                              - 
+                                Name: BROWSER_VERSION
+                                Value: '86.0'
+                              - 
+                                Name: DRIVER_VERSION
+                                Value: '0.29.0'
+                              - 
+                                Name: module
+                                Value: mod7
+                              - 
+                                Name: DISPLAY
+                                Value: ':25'
+                              - 
+                                Name: tcname
+                                Value: tc0011
+                              - 
+                                Name: testrun
+                                Value.$: $$.Execution.Id
+                    End: true
+            End: true
+      RoleArn: !GetAtt SfnExecutionRole.Arn
+      Tags:
+        - Key: Application
+          Value: !Ref AWS::StackId
+        - Key: Name
+          Value: SUIT-StateMachine
