@@ -11,7 +11,7 @@ Parameters:
   ApprovalEmail:
     Description: Enter the email address to which approval notification needs to be sent
     Type: String
-    Default: ppalanis@amazon.com
+    Default: no-reply@example.com
     AllowedPattern: ^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$
     ConstraintDescription: Ecpects a valid email address
 
