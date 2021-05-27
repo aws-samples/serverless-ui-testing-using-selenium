@@ -20,6 +20,7 @@ Resources:
     Type: AWS::SNS::Topic
     Properties:
       TopicName: !Sub ${AWS::StackName}-approval-topic
+      KmsMasterKeyId: alias/aws/sns
       DisplayName: SUIT-Approval-Notification
       Subscription: 
         - Endpoint: !Ref ApprovalEmail
