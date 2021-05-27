@@ -37,6 +37,11 @@ Resources:
     DeletionPolicy: Retain
     Properties:
       AccessControl: Private
+      BucketEncryption: 
+        ServerSideEncryptionConfiguration:
+          - BucketKeyEnabled: true
+            ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
       BucketName: !Sub ${AWS::StackName}-test-output-${AWS::AccountId}-${AWS::Region}
       Tags:
         - Key: Application
@@ -48,6 +53,11 @@ Resources:
     UpdateReplacePolicy: Retain
     Properties:
       AccessControl: Private
+      BucketEncryption: 
+        ServerSideEncryptionConfiguration:
+          - BucketKeyEnabled: true
+            ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
       BucketName: !Sub ${AWS::StackName}-codepipeline-artifact-${AWS::AccountId}-${AWS::Region}
       Tags:
         - Key: Application
