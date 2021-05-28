@@ -43,6 +43,8 @@ Resources:
             ServerSideEncryptionByDefault:
               SSEAlgorithm: AES256
       BucketName: !Sub ${AWS::StackName}-test-output-${AWS::AccountId}-${AWS::Region}
+      VersioningConfiguration:
+        Status: Enabled
       Tags:
         - Key: Application
           Value: !Ref AWS::StackId
@@ -59,6 +61,8 @@ Resources:
             ServerSideEncryptionByDefault:
               SSEAlgorithm: AES256
       BucketName: !Sub ${AWS::StackName}-codepipeline-artifact-${AWS::AccountId}-${AWS::Region}
+      VersioningConfiguration:
+        Status: Enabled
       Tags:
         - Key: Application
           Value: !Ref AWS::StackId
@@ -891,7 +895,7 @@ Resources:
               ActionTypeId:
                 Category: Approval
                 Owner: AWS
-                Version: 1
+                Version: "1"
                 Provider: Manual
               Configuration:
                 NotificationArn: !Ref ApprovalTopic
